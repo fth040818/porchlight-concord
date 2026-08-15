@@ -1,0 +1,43 @@
+[bot]
+name = "Porchlight"
+about = "A privacy-conscious welcome guide and opt-in buddy matcher for small Concord communities."
+data_dir = ".porchlight-data/vector"
+state_file = ".porchlight-data/porchlight-state.json"
+
+# "manual" waits for the operator, "public" accepts every community invite,
+# and "whitelist" accepts invites only from owner_npubs.
+invite_policy = "manual"
+owner_npubs = []
+
+[welcome]
+public_message = "👋 Welcome, {user}! Porchlight can help you get oriented. Type / to see the onboarding commands."
+dm_intro = "Welcome! I am Porchlight, the community's onboarding helper. Run /intro in the community, then use /profile and /buddy only in this encrypted DM. My own JSON stores only bounded onboarding fields and delivery metadata, but Vector also keeps a local event database."
+checklist = [
+  "Read the community purpose and rules",
+  "Run /intro in the community to open private onboarding",
+  "Use /profile in the encrypted DM to share optional matching details",
+  "Browse useful links with /resources",
+  "See upcoming gatherings with /events",
+  "Optionally meet one member with /buddy in the encrypted DM",
+]
+
+[[resources]]
+topic = "start"
+label = "Concord overview"
+url = "https://soapbox.pub/blog/building-an-armada-voyage-to-encrypted-communities"
+description = "Why Concord communities are private and how the ecosystem fits together."
+
+[[resources]]
+topic = "privacy"
+label = "Nostr protocol specifications"
+url = "https://github.com/nostr-protocol/nips"
+description = "The open protocol documents behind Nostr."
+
+[[events]]
+title = "Community welcome circle"
+when = "Every Friday, 18:00 UTC"
+where = "#lounge"
+url = ""
+
+[privacy]
+retention_note = "Porchlight JSON stores your npub, community/channel scope, session data, declared interests/timezone, queue/match state, and generated delivery metadata. Session and queue authorization expire, but records may remain until /forget or operator cleanup; matches and sent-delivery receipts have no automatic expiry. /forget cannot erase Vector's local event database, relays, delivered messages, recipients, or backups."

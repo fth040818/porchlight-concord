@@ -1,0 +1,34 @@
+[package]
+name = "porchlight-concord"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "A privacy-conscious onboarding and buddy-matching bot for Concord communities on Nostr"
+license = "MIT"
+repository = "https://github.com/fth040818/porchlight-concord"
+keywords = ["nostr", "concord", "community", "onboarding", "bot"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+fs2 = "=0.4.3"
+nostr-sdk = "=0.45.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "fs", "io-util", "signal", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+vector_sdk = "=0.8.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

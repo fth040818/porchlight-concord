@@ -1,0 +1,17 @@
+/target/
+**/.porchlight-data/
+**/.demo-data/
+**/porchlight.toml
+.env
+.env.*
+!.env.example
+*.nsec
+*.log
+**/.porchlight.lock
+**/porchlight-state.json
+**/porchlight-state.json.lock
+**/porchlight-state.json.*.tmp
+**/vector.db
+**/vector.db-wal
+**/vector.db-shm
+**/active_account
