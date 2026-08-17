@@ -45,7 +45,7 @@ However, the pinned `vector_sdk 0.8.2` maintains its own local SQLite account da
 
 ## Quick start
 
-Requirements: Rust 1.88+ and a Concord-compatible community/client.
+Requirements: Rust 1.91+ and a Concord-compatible community/client. The pinned `vector-core 0.7.2` uses `str::floor_char_boundary`, which became stable in Rust 1.91 despite the crate advertising a lower compiler requirement.
 
 ```sh
 cp porchlight.example.toml porchlight.toml

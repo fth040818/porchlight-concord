@@ -2,7 +2,7 @@
 name = "porchlight-concord"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.91"
 description = "A privacy-conscious onboarding and buddy-matching bot for Concord communities on Nostr"
 license = "MIT"
 repository = "https://github.com/fth040818/porchlight-concord"
