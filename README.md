@@ -92,7 +92,7 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Unit tests cover token/session races, message deduplication, input bounds, concurrent duplicate joins, scope changes, candidate validation, community-scoped leave/removal cleanup, outbox retry, welcome idempotency, process locking, atomic reload, schema rejection and rollback after persistence failure. A full encrypted network demo additionally requires a fresh Concord community, the bot identity and two disposable test members. The 2026-08-15 two-member run and its public identifiers are recorded in [docs/e2e-evidence.md](docs/e2e-evidence.md).
+Unit tests cover token/session races, message deduplication, input bounds, concurrent duplicate joins, scope changes, candidate validation, community-scoped leave/removal cleanup, outbox retry, welcome idempotency, process locking, atomic reload, schema rejection and rollback after persistence failure. A full encrypted network demo additionally requires a fresh Concord community, the bot identity and two disposable test members. The original 2026-08-15 run and a final-code 2026-08-17 confirmation bound to commit `d7b2020` are recorded in [docs/e2e-evidence.md](docs/e2e-evidence.md).
 
 ## Known limits
 

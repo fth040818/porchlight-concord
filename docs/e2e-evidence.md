@@ -1,6 +1,26 @@
 # Encrypted two-member demo evidence
 
-This records the disposable live-network acceptance run performed on 2026-08-15 from 12:10 to 12:13 (UTC+08:00). It contains no private keys, payment credentials or real-user profile data.
+This records disposable live-network acceptance runs performed on 2026-08-15 and 2026-08-17. It contains no private keys, payment credentials or real-user profile data.
+
+## Final-code confirmation — 2026-08-17
+
+The hardened source at commit `d7b2020` was rebuilt and exercised on the live network from 21:14 to 21:17 (UTC+08:00). Two newly generated disposable members independently completed the full public-to-private path:
+
+- Member G: `npub1mmmn0flvcd676cjm434huwags4t0l4vsy7gts8vdkuxpse3w25sqg9q0ul`
+- Member I: `npub1hf3l08epdha7gvqc0jkade6d904dkkgkuhf3v0rwvqmlpsz73auqws7dta`
+- Reciprocal match: `PLM-00000004`
+- Introduction deliveries: `PLD-00000017` and `PLD-00000018`
+
+```text
+DEMO_MEMBER_READY=G:npub1mmmn0flvcd676cjm434huwags4t0l4vsy7gts8vdkuxpse3w25sqg9q0ul
+DEMO_MEMBER_READY=I:npub1hf3l08epdha7gvqc0jkade6d904dkkgkuhf3v0rwvqmlpsz73auqws7dta
+DEMO_MATCH_RECEIVED=G:PLM-00000004
+DEMO_MATCH_RECEIVED=I:PLM-00000004
+```
+
+The persisted state contained two reciprocal match rows created at `2026-08-17T13:17:00Z`. Both delivery receipts were acknowledged at `13:17:01Z` / `13:17:02Z`, and both retained bodies were `null`. The same commit passed 31 unit tests, formatting, and Clippy with warnings denied before this run. The bot was stopped after evidence capture.
+
+## Original acceptance run — 2026-08-15
 
 ## Environment
 
