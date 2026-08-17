@@ -19,11 +19,13 @@ Encrypted communities solve an important protocol problem, but a newcomer can st
 - `/profile` also has no arguments. In DM it issues a one-time session token; the next ordinary DM carries `TOKEN | timezone | interests` so sensitive fields can never be typed-command arguments in a community channel.
 - `/buddy`, `/buddy_leave` and `/buddy_status` have no arguments and work only in DM.
 - Matching requires at least one shared declared interest; equal-interest candidates use timezone as a tie-breaker.
+- Waiting candidates are membership-checked before selection, and both participants are checked again under per-member locks immediately before either introduction is sent. A failed check cancels the match without sending shared interests.
+- Every queued welcome is bound to its community/channel and membership-checked again before send. `MemberLeave` removes that community's pending/profile state, related matches and unsent deliveries; `Removed` clears the community after the bot itself leaves or is kicked.
 - `/privacy` explains storage, while `/forget` removes Porchlight's own application state.
 - A persistent delivery outbox retries partial welcome and buddy-notification failures. Stable delivery and match IDs make possible duplicates recognizable.
 - JSON mutations use clone → same-directory temporary file → `sync_all` → atomic replacement → in-memory commit. The state and Vector data directories are locked against a second Porchlight process.
 - On startup, active DM onboarding sessions reconcile up to 100 locally synced messages by message ID. Per-sender locks and token checks serialize the sensitive path.
-- Before saving a profile or joining the queue, Porchlight rechecks the member and origin-channel access from Vector's local folded Concord view and fails closed if it cannot confirm them.
+- Before saving a profile, joining the queue, selecting a waiting candidate or sending any welcome or buddy introduction, Porchlight rechecks the bot's community presence plus member and origin-channel access from Vector's local folded Concord view and fails closed if it cannot confirm them.
 
 ## Storage and privacy boundary
 
@@ -90,11 +92,14 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Unit tests cover token/session races, message deduplication, input bounds, concurrent duplicate joins, scope changes, outbox retry, welcome idempotency, process locking, atomic reload, schema rejection and rollback after persistence failure. A full encrypted network demo additionally requires a fresh Concord community, the bot identity and two disposable test members. The 2026-08-15 two-member run and its public identifiers are recorded in [docs/e2e-evidence.md](docs/e2e-evidence.md).
+Unit tests cover token/session races, message deduplication, input bounds, concurrent duplicate joins, scope changes, candidate validation, community-scoped leave/removal cleanup, outbox retry, welcome idempotency, process locking, atomic reload, schema rejection and rollback after persistence failure. A full encrypted network demo additionally requires a fresh Concord community, the bot identity and two disposable test members. The 2026-08-15 two-member run and its public identifiers are recorded in [docs/e2e-evidence.md](docs/e2e-evidence.md).
 
 ## Known limits
 
-- Vector's membership APIs are eventually consistent local folds, not a fresh authoritative network query. Porchlight rejects when the required evidence is absent, which can produce temporary false negatives.
+- Vector's membership APIs are eventually consistent local folds, not a fresh authoritative network query. Porchlight rejects when the required evidence is absent, which can produce temporary false negatives or cancel a valid match that can be retried later.
+- Online `MemberLeave` events remove state at community scope. Leave events missed while the bot is offline are not replayed by the SDK, so the final pre-send membership check remains the privacy gate.
+- Event handlers run concurrently. Porchlight deliberately treats an observed leave as authoritative for privacy; a stale leave arriving after a quick rejoin can clear application state, requiring the member to run `/intro` again.
+- Vector has no atomic "membership check and send" operation. A member can leave during the narrow interval after the final local check but before the network send completes; an observed leave still cancels anything that remains queued.
 - A `MemberJoin` or slash command received only while the bot is offline is not replayed by the SDK. Porchlight attempts to reconcile active token-bound DM answers only when the SDK exposes them in local history; that history was empty after reopening one disposable test identity, so recovery is not guaranteed. Keep the bot and clients online during onboarding.
 - The outbox is at-least-once and wakes every 30 seconds. If a Nostr send succeeds and the local acknowledgement write then fails, a retry can duplicate a message; its stable `PLD-*`/`PLM-*` ID identifies the duplicate.
 - Matching requires a shared interest. Timezone only breaks ties; it never creates a match by itself.

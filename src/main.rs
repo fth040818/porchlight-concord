@@ -6,7 +6,7 @@ use porchlight_concord::{
     InvitePolicy, JoinOutcome, MembershipScope, ProfileCompletion, ProfilePrompt, StateStore,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::Arc,
@@ -147,6 +147,7 @@ impl DataDirGuard {
 struct FlushSummary {
     sent: usize,
     failed: usize,
+    canceled: usize,
 }
 
 #[tokio::main]
@@ -242,14 +243,43 @@ async fn run(config: AppConfig, invite: Option<String>) -> Result<()> {
                     reconcile_pending_profiles(&bot, &state, &sender_locks).await;
                 }
                 BotEvent::MemberJoin { channel_id, npub } if npub != bot.npub() => {
+                    let Some(community_id) = community_id_for_channel(&bot, &channel_id).await else {
+                        warn!(%npub, %channel_id, "could not map MemberJoin channel to a community; skipped welcome for fail-safe privacy");
+                        return;
+                    };
+                    let scope = MembershipScope {
+                        community_id,
+                        channel_id: channel_id.clone(),
+                    };
                     let sender_lock = sender_locks.for_sender(&npub).await;
                     let guard = sender_lock.lock().await;
-                    let queued = queue_welcome(&state, &config, &channel_id, &npub).await;
+                    let queued = queue_welcome(&state, &config, scope, &npub).await;
                     drop(guard);
                     if let Err(error) = queued {
                         error!(%error, "failed to queue welcome delivery");
                     } else {
                         flush_outbox(&bot, &state, &sender_locks).await;
+                    }
+                }
+                BotEvent::MemberLeave { channel_id, npub } if npub != bot.npub() => {
+                    let Some(community_id) = community_id_for_channel(&bot, &channel_id).await else {
+                        warn!(%npub, %channel_id, "could not map MemberLeave channel to a community; retained state for fail-safe review");
+                        return;
+                    };
+                    let sender_lock = sender_locks.for_sender(&npub).await;
+                    let _guard = sender_lock.lock().await;
+                    match state.remove_member_from_community(&npub, &community_id).await {
+                        Ok(true) => info!(%npub, %community_id, "removed departed member onboarding, match and pending delivery state"),
+                        Ok(false) => {}
+                        Err(error) => error!(%npub, %community_id, %error, "failed to remove departed member state"),
+                    }
+                }
+                BotEvent::Removed { community_id } => {
+                    vector_core::community::realtime::teardown_local(&community_id).await;
+                    match state.remove_community(&community_id).await {
+                        Ok(true) => info!(%community_id, "removed state and pending deliveries after Porchlight left the community"),
+                        Ok(false) => {}
+                        Err(error) => error!(%community_id, %error, "failed to remove state after Porchlight left the community"),
                     }
                 }
                 BotEvent::Message(message)
@@ -415,7 +445,15 @@ fn register_commands(
                         let _ = ctx.reply("I could not confirm current membership from my local Concord view. Nothing was queued; retry after the community finishes syncing.").await;
                         return;
                     }
-                    let outcome = state.join_buddy_queue(&npub).await;
+                    let mut eligible_candidates = BTreeSet::new();
+                    for (candidate, scope) in state.buddy_candidates(&npub).await {
+                        if member_can_use_scope(&ctx.bot, &scope, &candidate).await {
+                            eligible_candidates.insert(candidate);
+                        }
+                    }
+                    let outcome = state
+                        .join_buddy_queue(&npub, &eligible_candidates)
+                        .await;
                     drop(_guard);
                     match outcome {
                         Ok(JoinOutcome::Waiting) => {
@@ -429,8 +467,8 @@ fn register_commands(
                             let summary = flush_outbox(&ctx.bot, &state, &sender_locks).await;
                             let pending = state.pending_delivery_count().await;
                             let _ = ctx.reply(format!(
-                                "Match {} was created. Delivery attempt: {} sent, {} failed; {} introduction message(s) remain queued.",
-                                pair.match_id, summary.sent, summary.failed, pending
+                                "Match {} was created. Delivery attempt: {} sent, {} failed, {} canceled after membership recheck; {} introduction message(s) remain queued.",
+                                pair.match_id, summary.sent, summary.failed, summary.canceled, pending
                             )).await;
                         }
                         Err(error) => {
@@ -775,7 +813,17 @@ async fn reconcile_pending_profiles(
 }
 
 async fn member_can_use_scope(bot: &VectorBot, scope: &MembershipScope, npub: &str) -> bool {
-    let community = bot.community(scope.community_id.clone());
+    let Some(community) = bot
+        .communities()
+        .await
+        .into_iter()
+        .find(|community| community.id() == scope.community_id)
+    else {
+        return false;
+    };
+    if community.is_dissolved().await {
+        return false;
+    }
     if !community
         .members()
         .await
@@ -801,10 +849,24 @@ async fn member_can_use_scope(bot: &VectorBot, scope: &MembershipScope, npub: &s
         .any(|member| member.npub() == npub)
 }
 
+async fn community_id_for_channel(bot: &VectorBot, channel_id: &str) -> Option<String> {
+    for community in bot.communities().await {
+        if community
+            .channels()
+            .await
+            .iter()
+            .any(|channel| channel.id() == channel_id)
+        {
+            return Some(community.id().to_string());
+        }
+    }
+    None
+}
+
 async fn queue_welcome(
     state: &StateStore,
     config: &AppConfig,
-    channel_id: &str,
+    scope: MembershipScope,
     npub: &str,
 ) -> Result<()> {
     let label = short_npub(npub);
@@ -815,7 +877,7 @@ async fn queue_welcome(
         config.checklist_text(),
         config.privacy.retention_note
     );
-    state.queue_welcome(channel_id, npub, public, private).await
+    state.queue_welcome(scope, npub, public, private).await
 }
 
 async fn flush_outbox(
@@ -845,6 +907,52 @@ async fn flush_outbox(
         }
         if !state.delivery_is_pending(&delivery.id).await {
             continue;
+        }
+        if delivery.participants.len() <= 1 {
+            let participant = delivery.participants.first();
+            let membership_valid = match (participant, delivery.membership_scope.as_ref()) {
+                (Some(participant), Some(scope)) => {
+                    member_can_use_scope(bot, scope, participant).await
+                }
+                _ => false,
+            };
+            if !membership_valid {
+                warn!(delivery = %delivery.id, "single-member delivery canceled because its current membership scope could not be confirmed");
+                match state.cancel_delivery(&delivery.id).await {
+                    Ok(true) => summary.canceled += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        summary.failed += 1;
+                        error!(delivery = %delivery.id, %error, "failed to persist invalid delivery cancellation; nothing was sent and the lease remains for retry");
+                    }
+                }
+                continue;
+            }
+        }
+        if delivery.participants.len() > 1 {
+            let mut invalid_member = None;
+            for participant in &delivery.participants {
+                let Some(scope) = state.profile_membership(participant).await else {
+                    invalid_member = Some(participant.clone());
+                    break;
+                };
+                if !member_can_use_scope(bot, &scope, participant).await {
+                    invalid_member = Some(participant.clone());
+                    break;
+                }
+            }
+            if let Some(invalid_member) = invalid_member {
+                warn!(delivery = %delivery.id, member = %invalid_member, "buddy delivery canceled because current membership could not be confirmed");
+                match state.cancel_buddy_match(&invalid_member).await {
+                    Ok(true) => summary.canceled += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        summary.failed += 1;
+                        error!(delivery = %delivery.id, %error, "failed to persist invalid buddy-match cancellation; nothing was sent and the lease remains for retry");
+                    }
+                }
+                continue;
+            }
         }
         let result = match &delivery.target {
             DeliveryTarget::Direct(npub) => bot.dm(npub.clone()).send(&delivery.body).await,

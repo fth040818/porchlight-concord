@@ -100,6 +100,8 @@ struct DeliveryRecord {
     id: String,
     dedupe_key: String,
     participants: Vec<String>,
+    #[serde(default)]
+    membership_scope: Option<MembershipScope>,
     target: DeliveryTarget,
     body: Option<String>,
     created_at: u64,
@@ -118,11 +120,12 @@ pub enum DeliveryTarget {
 pub struct ClaimedDelivery {
     pub id: String,
     pub participants: Vec<String>,
+    pub membership_scope: Option<MembershipScope>,
     pub target: DeliveryTarget,
     pub body: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipScope {
     pub community_id: String,
     pub channel_id: String,
@@ -432,7 +435,7 @@ impl StateStore {
                     || profile.channel_id != pending.channel_id
             });
             if scope_changed {
-                cleanup_member_relations(state, &npub);
+                cleanup_buddy_relations(state, &npub);
             }
             state.profiles.insert(
                 npub.clone(),
@@ -451,8 +454,44 @@ impl StateStore {
         .await
     }
 
-    pub async fn join_buddy_queue(&self, npub: &str) -> Result<JoinOutcome> {
+    pub async fn buddy_candidates(&self, npub: &str) -> Vec<(String, MembershipScope)> {
+        let now = now_secs();
+        let state = self.inner.lock().await;
+        let Some(profile) = state.profiles.get(npub) else {
+            return Vec::new();
+        };
+        state
+            .waiting
+            .get(&profile.community_id)
+            .into_iter()
+            .flat_map(|queue| queue.iter())
+            .filter(|(candidate, expires_at)| {
+                candidate.as_str() != npub
+                    && **expires_at > now
+                    && !state.matches.contains_key(candidate.as_str())
+            })
+            .filter_map(|(candidate, _)| {
+                let candidate_profile = state.profiles.get(candidate)?;
+                (candidate_profile.community_id == profile.community_id).then(|| {
+                    (
+                        candidate.clone(),
+                        MembershipScope {
+                            community_id: candidate_profile.community_id.clone(),
+                            channel_id: candidate_profile.channel_id.clone(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub async fn join_buddy_queue(
+        &self,
+        npub: &str,
+        eligible_candidates: &BTreeSet<String>,
+    ) -> Result<JoinOutcome> {
         let npub = npub.to_string();
+        let eligible_candidates = eligible_candidates.clone();
         let now = now_secs();
         self.update(move |state| {
             prune_waiting(state, now);
@@ -464,7 +503,7 @@ impl StateStore {
                 if existing.scope == profile.community_id {
                     return Ok(JoinOutcome::AlreadyMatched(existing.partner.clone()));
                 }
-                cleanup_member_relations(state, &npub);
+                cleanup_buddy_relations(state, &npub);
             }
 
             let mut queue = state
@@ -481,7 +520,13 @@ impl StateStore {
                         .is_some_and(|other| other.community_id == profile.community_id)
             });
 
-            let candidate = best_candidate(&state.profiles, queue.keys(), &npub);
+            let candidate = best_candidate(
+                &state.profiles,
+                queue
+                    .keys()
+                    .filter(|candidate| eligible_candidates.contains(candidate.as_str())),
+                &npub,
+            );
             let outcome = if let Some(candidate) = candidate {
                 queue.remove(&candidate);
                 state.next_match_id = next_counter(state.next_match_id, "buddy match")?;
@@ -521,6 +566,115 @@ impl StateStore {
 
             state.waiting.insert(profile.community_id, queue);
             Ok(outcome)
+        })
+        .await
+    }
+
+    pub async fn remove_member_from_community(
+        &self,
+        npub: &str,
+        community_id: &str,
+    ) -> Result<bool> {
+        let npub = npub.to_string();
+        let community_id = community_id.to_string();
+        self.update(move |state| {
+            let remove_pending = state
+                .pending
+                .get(&npub)
+                .is_some_and(|pending| pending.community_id == community_id);
+            let remove_profile = state
+                .profiles
+                .get(&npub)
+                .is_some_and(|profile| profile.community_id == community_id);
+            if remove_pending {
+                state.pending.remove(&npub);
+            }
+            if remove_profile {
+                state.profiles.remove(&npub);
+                cleanup_buddy_relations(state, &npub);
+            }
+            let before = state.deliveries.len();
+            state.deliveries.retain(|_, delivery| {
+                !delivery.participants.iter().any(|member| member == &npub)
+                    || delivery
+                        .membership_scope
+                        .as_ref()
+                        .is_none_or(|scope| scope.community_id != community_id)
+            });
+            Ok(remove_pending || remove_profile || before != state.deliveries.len())
+        })
+        .await
+    }
+
+    pub async fn remove_community(&self, community_id: &str) -> Result<bool> {
+        let community_id = community_id.to_string();
+        self.update(move |state| {
+            let mut buddy_participants = BTreeSet::new();
+            for (npub, record) in &state.matches {
+                if record.scope == community_id {
+                    buddy_participants.insert(npub.clone());
+                    buddy_participants.insert(record.partner.clone());
+                }
+            }
+
+            let before = state.pending.len()
+                + state.profiles.len()
+                + state.waiting.len()
+                + state.matches.len()
+                + state.deliveries.len();
+            state
+                .pending
+                .retain(|_, pending| pending.community_id != community_id);
+            state
+                .profiles
+                .retain(|_, profile| profile.community_id != community_id);
+            state.waiting.remove(&community_id);
+            state
+                .matches
+                .retain(|_, record| record.scope != community_id);
+            state.deliveries.retain(|_, delivery| {
+                delivery
+                    .membership_scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.community_id != community_id)
+                    && (delivery.participants.len() <= 1
+                        || !delivery
+                            .participants
+                            .iter()
+                            .any(|member| buddy_participants.contains(member)))
+            });
+            let after = state.pending.len()
+                + state.profiles.len()
+                + state.waiting.len()
+                + state.matches.len()
+                + state.deliveries.len();
+            Ok(before != after)
+        })
+        .await
+    }
+
+    pub async fn cancel_buddy_match(&self, npub: &str) -> Result<bool> {
+        let npub = npub.to_string();
+        self.update(move |state| {
+            let mut participants = BTreeSet::from([npub.clone()]);
+            if let Some(record) = state.matches.remove(&npub) {
+                participants.insert(record.partner.clone());
+                state.matches.remove(&record.partner);
+            }
+            for queue in state.waiting.values_mut() {
+                for participant in &participants {
+                    queue.remove(participant);
+                }
+            }
+            let before = state.deliveries.len();
+            state.deliveries.retain(|_, delivery| {
+                delivery.participants.len() <= 1
+                    || !delivery
+                        .participants
+                        .iter()
+                        .any(|member| participants.contains(member))
+            });
+            Ok(participants.len() > 1 || before != state.deliveries.len())
         })
         .await
     }
@@ -571,7 +725,12 @@ impl StateStore {
         self.update(move |state| {
             let mut existed = state.pending.remove(&npub).is_some();
             existed |= state.profiles.remove(&npub).is_some();
-            existed |= cleanup_member_relations(state, &npub);
+            existed |= cleanup_buddy_relations(state, &npub);
+            let before = state.deliveries.len();
+            state
+                .deliveries
+                .retain(|_, delivery| !delivery.participants.iter().any(|member| member == &npub));
+            existed |= before != state.deliveries.len();
             Ok(existed)
         })
         .await
@@ -579,27 +738,29 @@ impl StateStore {
 
     pub async fn queue_welcome(
         &self,
-        scope: &str,
+        scope: MembershipScope,
         npub: &str,
         public_body: String,
         private_body: String,
     ) -> Result<()> {
-        let scope = scope.to_string();
+        let channel_id = scope.channel_id.clone();
         let npub = npub.to_string();
         let now = now_secs();
         self.update(move |state| {
             queue_delivery(
                 state,
-                format!("welcome:public:{scope}:{npub}"),
+                format!("welcome:public:{channel_id}:{npub}"),
                 vec![npub.clone()],
-                DeliveryTarget::Channel(scope.clone()),
+                Some(scope.clone()),
+                DeliveryTarget::Channel(channel_id.clone()),
                 public_body,
                 now,
             )?;
             queue_delivery(
                 state,
-                format!("welcome:private:{scope}:{npub}"),
+                format!("welcome:private:{channel_id}:{npub}"),
                 vec![npub.clone()],
+                Some(scope),
                 DeliveryTarget::Direct(npub),
                 private_body,
                 now,
@@ -628,6 +789,7 @@ impl StateStore {
             claimed.push(ClaimedDelivery {
                 id: record.id.clone(),
                 participants: record.participants.clone(),
+                membership_scope: record.membership_scope.clone(),
                 target: record.target.clone(),
                 body: record.body.clone().unwrap_or_default(),
             });
@@ -647,6 +809,12 @@ impl StateStore {
             .deliveries
             .get(id)
             .is_some_and(|record| record.sent_at.is_none() && record.body.is_some())
+    }
+
+    pub async fn cancel_delivery(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.update(move |state| Ok(state.deliveries.remove(&id).is_some()))
+            .await
     }
 
     pub async fn acknowledge_delivery(&self, id: &str) -> Result<bool> {
@@ -757,6 +925,7 @@ fn queue_buddy_deliveries(state: &mut PersistedState, pair: &BuddyMatch, now: u6
         state,
         format!("buddy:{}:{}", pair.match_id, pair.first),
         participants.clone(),
+        None,
         DeliveryTarget::Direct(pair.first.clone()),
         first_body,
         now,
@@ -765,6 +934,7 @@ fn queue_buddy_deliveries(state: &mut PersistedState, pair: &BuddyMatch, now: u6
         state,
         format!("buddy:{}:{}", pair.match_id, pair.second),
         participants,
+        None,
         DeliveryTarget::Direct(pair.second.clone()),
         second_body,
         now,
@@ -776,6 +946,7 @@ fn queue_delivery(
     state: &mut PersistedState,
     dedupe_key: String,
     participants: Vec<String>,
+    membership_scope: Option<MembershipScope>,
     target: DeliveryTarget,
     body: String,
     now: u64,
@@ -795,6 +966,7 @@ fn queue_delivery(
             id,
             dedupe_key,
             participants,
+            membership_scope,
             target,
             body: Some(body),
             created_at: now,
@@ -805,7 +977,7 @@ fn queue_delivery(
     Ok(())
 }
 
-fn cleanup_member_relations(state: &mut PersistedState, npub: &str) -> bool {
+fn cleanup_buddy_relations(state: &mut PersistedState, npub: &str) -> bool {
     let mut existed = false;
     for queue in state.waiting.values_mut() {
         existed |= queue.remove(npub).is_some();
@@ -815,9 +987,10 @@ fn cleanup_member_relations(state: &mut PersistedState, npub: &str) -> bool {
         existed = true;
     }
     let before = state.deliveries.len();
-    state
-        .deliveries
-        .retain(|_, delivery| !delivery.participants.iter().any(|member| member == npub));
+    state.deliveries.retain(|_, delivery| {
+        delivery.participants.len() <= 1
+            || !delivery.participants.iter().any(|member| member == npub)
+    });
     existed |= before != state.deliveries.len();
     existed
 }
@@ -1118,6 +1291,17 @@ mod tests {
         );
     }
 
+    fn eligible(npubs: &[&str]) -> BTreeSet<String> {
+        npubs.iter().map(|npub| (*npub).to_string()).collect()
+    }
+
+    fn scope(community_id: &str) -> MembershipScope {
+        MembershipScope {
+            community_id: community_id.to_string(),
+            channel_id: format!("{community_id}-general"),
+        }
+    }
+
     #[tokio::test]
     async fn profile_session_is_token_bound_and_consumed() {
         let (_dir, store) = store().await;
@@ -1210,15 +1394,21 @@ mod tests {
         profile(&store, "bob", "lounge", &["gardening"]).await;
         profile(&store, "carol", "lounge", &["music", "nostr"]).await;
         assert_eq!(
-            store.join_buddy_queue("bob").await.unwrap(),
+            store.join_buddy_queue("bob", &eligible(&[])).await.unwrap(),
             JoinOutcome::Waiting
         );
         assert_eq!(
-            store.join_buddy_queue("carol").await.unwrap(),
+            store
+                .join_buddy_queue("carol", &eligible(&[]))
+                .await
+                .unwrap(),
             JoinOutcome::Waiting
         );
 
-        let JoinOutcome::NewlyMatched(matched) = store.join_buddy_queue("alice").await.unwrap()
+        let JoinOutcome::NewlyMatched(matched) = store
+            .join_buddy_queue("alice", &eligible(&["bob", "carol"]))
+            .await
+            .unwrap()
         else {
             panic!("expected a new match")
         };
@@ -1232,10 +1422,51 @@ mod tests {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["music"]).await;
         profile(&store, "bob", "lounge", &["gardening"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
         assert_eq!(
-            store.join_buddy_queue("alice").await.unwrap(),
+            store
+                .join_buddy_queue("alice", &eligible(&["bob"]))
+                .await
+                .unwrap(),
             JoinOutcome::Waiting
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unvalidated_candidate_is_not_matched() {
+        let (_dir, store) = store().await;
+        profile(&store, "alice", "lounge", &["nostr"]).await;
+        profile(&store, "bob", "lounge", &["nostr"]).await;
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+
+        assert_eq!(
+            store
+                .join_buddy_queue("alice", &eligible(&[]))
+                .await
+                .unwrap(),
+            JoinOutcome::Waiting
+        );
+        assert_eq!(store.pending_delivery_count().await, 0);
+        assert_eq!(store.buddy_status("alice").await, BuddyStatus::Waiting);
+        assert_eq!(store.buddy_status("bob").await, BuddyStatus::Waiting);
+    }
+
+    #[tokio::test]
+    async fn candidate_lookup_carries_the_bound_membership_scope() {
+        let (_dir, store) = store().await;
+        profile(&store, "alice", "lounge", &["nostr"]).await;
+        profile(&store, "bob", "lounge", &["nostr"]).await;
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+
+        assert_eq!(
+            store.buddy_candidates("alice").await,
+            vec![(
+                "bob".into(),
+                MembershipScope {
+                    community_id: "lounge".into(),
+                    channel_id: "lounge-general".into(),
+                },
+            )]
         );
     }
 
@@ -1244,11 +1475,13 @@ mod tests {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["nostr"]).await;
         profile(&store, "bob", "lounge", &["nostr"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
 
+        let first_eligible = eligible(&["bob"]);
+        let second_eligible = first_eligible.clone();
         let (first, second) = tokio::join!(
-            store.join_buddy_queue("alice"),
-            store.join_buddy_queue("alice")
+            store.join_buddy_queue("alice", &first_eligible),
+            store.join_buddy_queue("alice", &second_eligible)
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -1272,8 +1505,11 @@ mod tests {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["nostr"]).await;
         profile(&store, "bob", "lounge", &["nostr"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
-        store.join_buddy_queue("alice").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
         assert_eq!(store.pending_delivery_count().await, 2);
 
         profile(&store, "alice", "makers", &["rust"]).await;
@@ -1283,12 +1519,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaving_the_bound_community_clears_profile_match_and_deliveries() {
+        let (_dir, store) = store().await;
+        profile(&store, "alice", "lounge", &["nostr"]).await;
+        profile(&store, "bob", "lounge", &["nostr"]).await;
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
+
+        assert!(!store
+            .remove_member_from_community("bob", "unrelated-community")
+            .await
+            .unwrap());
+        assert!(store
+            .remove_member_from_community("bob", "lounge")
+            .await
+            .unwrap());
+        assert_eq!(store.buddy_status("bob").await, BuddyStatus::NoProfile);
+        assert_eq!(store.buddy_status("alice").await, BuddyStatus::NotQueued);
+        assert_eq!(store.pending_delivery_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn community_leave_removes_only_state_bound_to_that_community() {
+        let (_dir, store) = store().await;
+        profile(&store, "alice", "community-a", &["nostr"]).await;
+        store
+            .begin_onboarding("alice", "community-b", "community-b-general", "intro-b")
+            .await
+            .unwrap();
+
+        assert!(store
+            .remove_member_from_community("alice", "community-b")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.profile_membership("alice").await,
+            Some(MembershipScope {
+                community_id: "community-a".into(),
+                channel_id: "community-a-general".into(),
+            })
+        );
+        assert_eq!(store.pending_membership("alice").await, None);
+    }
+
+    #[tokio::test]
+    async fn canceling_a_buddy_match_preserves_single_member_welcome_deliveries() {
+        let (_dir, store) = store().await;
+        profile(&store, "alice", "lounge", &["nostr"]).await;
+        profile(&store, "bob", "lounge", &["nostr"]).await;
+        store
+            .queue_welcome(scope("lounge"), "alice", "public".into(), "private".into())
+            .await
+            .unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
+
+        assert!(store.cancel_buddy_match("alice").await.unwrap());
+        assert_eq!(store.buddy_status("alice").await, BuddyStatus::NotQueued);
+        assert_eq!(store.buddy_status("bob").await, BuddyStatus::NotQueued);
+        let remaining = store.claim_deliveries(10).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .all(|delivery| delivery.participants == vec!["alice"]));
+    }
+
+    #[tokio::test]
+    async fn community_leave_removes_only_that_communitys_welcome_deliveries() {
+        let (_dir, store) = store().await;
+        store
+            .queue_welcome(
+                scope("community-a"),
+                "alice",
+                "public-a".into(),
+                "private-a".into(),
+            )
+            .await
+            .unwrap();
+        store
+            .queue_welcome(
+                scope("community-b"),
+                "alice",
+                "public-b".into(),
+                "private-b".into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .remove_member_from_community("alice", "community-a")
+            .await
+            .unwrap());
+        let remaining = store.claim_deliveries(10).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .all(|delivery| { delivery.membership_scope.as_ref() == Some(&scope("community-b")) }));
+    }
+
+    #[tokio::test]
+    async fn removing_a_community_preserves_unrelated_welcomes_and_matches() {
+        let (_dir, store) = store().await;
+        store
+            .queue_welcome(
+                scope("community-a"),
+                "alice",
+                "public-a".into(),
+                "private-a".into(),
+            )
+            .await
+            .unwrap();
+        store
+            .queue_welcome(
+                scope("community-b"),
+                "alice",
+                "public-b".into(),
+                "private-b".into(),
+            )
+            .await
+            .unwrap();
+        profile(&store, "bob", "community-b", &["nostr"]).await;
+        profile(&store, "carol", "community-b", &["nostr"]).await;
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("carol", &eligible(&["bob"]))
+            .await
+            .unwrap();
+        profile(&store, "dave", "community-a", &["rust"]).await;
+        profile(&store, "erin", "community-a", &["rust"]).await;
+        store
+            .join_buddy_queue("dave", &eligible(&[]))
+            .await
+            .unwrap();
+        store
+            .join_buddy_queue("erin", &eligible(&["dave"]))
+            .await
+            .unwrap();
+
+        assert!(store.remove_community("community-b").await.unwrap());
+        assert_eq!(store.buddy_status("bob").await, BuddyStatus::NoProfile);
+        assert_eq!(
+            store.buddy_status("dave").await,
+            BuddyStatus::Matched("erin".into())
+        );
+        let remaining = store.claim_deliveries(10).await.unwrap();
+        assert_eq!(remaining.len(), 4);
+        assert!(remaining.iter().all(|delivery| {
+            delivery
+                .membership_scope
+                .as_ref()
+                .is_none_or(|scope| scope.community_id == "community-a")
+                && delivery
+                    .participants
+                    .iter()
+                    .all(|member| member == "alice" || member == "dave" || member == "erin")
+        }));
+    }
+
+    #[tokio::test]
     async fn delivery_outbox_claims_acks_and_retries() {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["nostr"]).await;
         profile(&store, "bob", "lounge", &["nostr"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
-        store.join_buddy_queue("alice").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
 
         let claimed = store.claim_deliveries(10).await.unwrap();
         assert_eq!(claimed.len(), 2);
@@ -1304,8 +1707,11 @@ mod tests {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["nostr"]).await;
         profile(&store, "bob", "lounge", &["nostr"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
-        store.join_buddy_queue("alice").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
 
         let claimed = store.claim_deliveries(1).await.unwrap();
         assert_eq!(claimed.len(), 1);
@@ -1331,8 +1737,11 @@ mod tests {
         let (_dir, store) = store().await;
         profile(&store, "alice", "lounge", &["nostr"]).await;
         profile(&store, "bob", "lounge", &["nostr"]).await;
-        store.join_buddy_queue("bob").await.unwrap();
-        store.join_buddy_queue("alice").await.unwrap();
+        store.join_buddy_queue("bob", &eligible(&[])).await.unwrap();
+        store
+            .join_buddy_queue("alice", &eligible(&["bob"]))
+            .await
+            .unwrap();
 
         let claimed = store.claim_deliveries(2).await.unwrap();
         assert_eq!(claimed.len(), 2);
@@ -1351,7 +1760,7 @@ mod tests {
         let (_dir, store) = store().await;
         for _ in 0..2 {
             store
-                .queue_welcome("lounge", "alice", "public".into(), "private".into())
+                .queue_welcome(scope("lounge"), "alice", "public".into(), "private".into())
                 .await
                 .unwrap();
         }

@@ -52,6 +52,8 @@ Operators remain responsible for backup expiry and deletion of filesystem copies
 ## Runtime and protocol limits
 
 - Membership validation uses Vector's eventually consistent local fold and fails closed when evidence is missing.
+- Waiting candidates are checked before selection and both participants are checked again under ordered per-member locks before a buddy delivery. Every welcome is likewise bound to and rechecked against its membership scope. Failure cancels the unsent delivery; an online `MemberLeave` removes member state at community scope, while `Removed` clears state after the bot itself leaves or is kicked.
+- Vector has no atomic membership-check-and-send primitive. Membership can change after Porchlight's final local check but before the network send completes; this narrow race cannot be eliminated by the application.
 - Porchlight attempts to reconcile active onboarding DMs from the most recent 100 messages only when the SDK exposes that local history after restart. One disposable restart test returned an empty history, so this is best-effort rather than guaranteed. Offline group commands and `MemberJoin` handlers are not replayed by the SDK.
 - Delivery is at-least-once. A crash after network send but before local acknowledgement can create a recognizable duplicate.
 - The pinned Vector core is affected by [issue #84](https://github.com/VectorPrivacy/Vector/issues/84), where a channel can stop advancing after a community base rekey. Use a fresh disposable evaluation community and avoid ban/kick/rekey.
