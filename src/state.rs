@@ -1259,8 +1259,19 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn store() -> (TempDir, StateStore) {
+    fn private_tempdir() -> TempDir {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    async fn store() -> (TempDir, StateStore) {
+        let dir = private_tempdir();
         let state = StateStore::load(dir.path().join("state.json"))
             .await
             .unwrap();
@@ -1780,7 +1791,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_survives_drop_and_reload() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("state.json");
         {
             let store = StateStore::load(path.clone()).await.unwrap();
@@ -1817,7 +1828,7 @@ mod tests {
     async fn insecure_existing_state_file_fails_closed_on_unix() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("state.json");
         std::fs::write(&path, br#"{"version":3}"#).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -1839,9 +1850,15 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_schema_version_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("state.json");
         tokio::fs::write(&path, br#"{"version":99}"#).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let error = StateStore::load(path).await.unwrap_err();
         assert!(error.to_string().contains("unsupported state schema"));
     }
