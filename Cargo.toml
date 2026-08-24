@@ -21,7 +21,7 @@ tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "fs", "io-u
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-vector_sdk = "=0.8.2"
+vector_sdk = "=0.9.0"
 vector-core = "=0.7.2"
 
 [target.'cfg(windows)'.dependencies]
