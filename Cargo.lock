@@ -1548,7 +1548,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "vector-core",
+ "vector-core 0.9.0",
  "vector_sdk",
  "windows-sys 0.61.2",
 ]
@@ -2612,6 +2612,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "vector-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d27e7600ba9c723134ed175052688ef8717701db470e2a713fd122d6536cf0f7"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "argon2",
+ "async-trait",
+ "base64-simd",
+ "bip39",
+ "bitcoin_hashes 1.2.0",
+ "chacha20 0.9.1",
+ "chacha20poly1305",
+ "fast-thumbhash",
+ "futures-util",
+ "hkdf",
+ "hmac",
+ "image",
+ "libc",
+ "nostr",
+ "nostr-blossom",
+ "nostr-connect",
+ "nostr-sdk",
+ "rand 0.8.7",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "unicode-normalization",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "vector_sdk"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2621,7 +2659,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "vector-core",
+ "vector-core 0.7.2",
 ]
 
 [[package]]
